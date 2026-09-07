@@ -1,4 +1,4 @@
-import { NormalizedSpec, pascalCase, SwaggerDefinition, TypeMappingConfig } from "@ng-openapi/shared";
+import { emitObjectKey, escapeSingleQuoted, quoteLiteral, NormalizedSpec, pascalCase, SwaggerDefinition, TypeMappingConfig } from "@ng-openapi/shared";
 import { BuildOptions, ZodPluginOptions } from "./utils/types";
 import { isReferenceObject } from "./utils/is-reference-object";
 
@@ -66,9 +66,11 @@ export class ZodSchemaBuilder {
             zodSchema = `${zodSchema}.optional()`;
         }
 
-        // Add description if present
-        if (schema.description) {
-            zodSchema = `${zodSchema}.describe('${this.escapeString(schema.description)}')`;
+        // Typed, not merely truthy: a description is untrusted JSON and nothing
+        // schema-validates it, so `"description": 42` reaches here and threw a
+        // raw TypeError out of the whole run.
+        if (typeof schema.description === "string" && schema.description) {
+            zodSchema = `${zodSchema}.describe('${escapeSingleQuoted(schema.description)}')`;
         }
 
         return zodSchema;
@@ -77,7 +79,7 @@ export class ZodSchemaBuilder {
     private async buildStringSchema(schema: SwaggerDefinition, buildOptions: BuildOptions): Promise<string> {
         // Handle enums
         if (schema.enum && schema.enum.every((v) => typeof v === "string")) {
-            const enumValues = schema.enum.map((v) => `'${this.escapeString(String(v))}'`).join(", ");
+            const enumValues = schema.enum.map((v) => emitEnumMember(v)).join(", ");
             return `z.enum([${enumValues}])`;
         }
 
@@ -120,15 +122,16 @@ export class ZodSchemaBuilder {
         let zodString = buildOptions.coerce ? "z.coerce.string()" : "z.string()";
 
         // Add constraints
-        if (schema.minLength !== undefined) {
+        if (typeof schema.minLength === "number" && Number.isFinite(schema.minLength)) {
             zodString += `.min(${schema.minLength})`;
         }
-        if (schema.maxLength !== undefined) {
+        if (typeof schema.maxLength === "number" && Number.isFinite(schema.maxLength)) {
             zodString += `.max(${schema.maxLength})`;
         }
-        if (schema.pattern) {
-            const escapedPattern = this.escapeRegex(schema.pattern);
-            zodString += `.regex(new RegExp('${escapedPattern}'))`;
+        if (typeof schema.pattern === "string") {
+            // escapeRegex doubled backslashes but left quotes alone, so a
+            // pattern containing one closed the literal.
+            zodString += `.regex(new RegExp(${quoteLiteral(stripRegexDelimiters(schema.pattern))}))`;
         }
 
         return zodString;
@@ -147,13 +150,13 @@ export class ZodSchemaBuilder {
         let zodNumber = buildOptions.coerce ? "z.coerce.number()" : "z.number()";
 
         // Add constraints
-        if (schema.minimum !== undefined) {
+        if (typeof schema.minimum === "number" && Number.isFinite(schema.minimum)) {
             zodNumber += `.min(${schema.minimum})`;
         }
-        if (schema.maximum !== undefined) {
+        if (typeof schema.maximum === "number" && Number.isFinite(schema.maximum)) {
             zodNumber += `.max(${schema.maximum})`;
         }
-        if (schema.multipleOf !== undefined) {
+        if (typeof schema.multipleOf === "number" && Number.isFinite(schema.multipleOf)) {
             zodNumber += `.multipleOf(${schema.multipleOf})`;
         }
         if (schema.type === "integer") {
@@ -192,10 +195,10 @@ export class ZodSchemaBuilder {
         let zodArray = `z.array(${itemSchema})`;
 
         // Add constraints
-        if (schema.minItems !== undefined) {
+        if (typeof schema.minItems === "number" && Number.isFinite(schema.minItems)) {
             zodArray += `.min(${schema.minItems})`;
         }
-        if (schema.maxItems !== undefined) {
+        if (typeof schema.maxItems === "number" && Number.isFinite(schema.maxItems)) {
             zodArray += `.max(${schema.maxItems})`;
         }
 
@@ -256,7 +259,9 @@ export class ZodSchemaBuilder {
                     `${name}${pascalCase(propName)}`,
                     { ...buildOptions, required: isRequired },
                 );
-                properties.push(`  "${propName}": ${propZodSchema}`);
+                // Computed key: see zod-schema.generator.ts — a "__proto__"
+                // property key mutates the prototype instead of being a key.
+                properties.push(`  ${emitObjectKey(propName)}: ${propZodSchema}`);
             }
 
             let objectSchema = `z.object({\n${properties.join(",\n")}\n})`;
@@ -298,40 +303,59 @@ export class ZodSchemaBuilder {
         return schema.type || "any";
     }
 
+    /**
+     * A default value as a zod `.default(...)` literal.
+     *
+     * Recursive, because a default is arbitrary JSON: object keys are spec text
+     * and went into the literal raw (`{ my-key: 1 }` is a syntax error, a
+     * `__proto__` key is the setter), and nested values went through
+     * `String()`, which emits `[object Object]` into source. Not
+     * `emitEnumMember`: that helper serializes an unknown value as a *string*
+     * because a z.enum member must be one, which turned `default: ["x", null]`
+     * into `['x', 'null']`.
+     */
     private generateDefaultValue(defaultValue: unknown): string {
         if (typeof defaultValue === "string") {
-            return `'${this.escapeString(defaultValue)}'`;
+            return quoteLiteral(defaultValue);
         }
-        if (typeof defaultValue === "number" || typeof defaultValue === "boolean") {
+        if (typeof defaultValue === "boolean" || (typeof defaultValue === "number" && Number.isFinite(defaultValue))) {
             return String(defaultValue);
         }
         if (defaultValue === null) {
             return "null";
         }
         if (Array.isArray(defaultValue)) {
-            const items = defaultValue.map((item) =>
-                typeof item === "string" ? `'${this.escapeString(item)}'` : String(item),
-            );
-            return `[${items.join(", ")}]`;
+            return `[${defaultValue.map((item) => this.generateDefaultValue(item)).join(", ")}]`;
         }
         if (typeof defaultValue === "object") {
             const entries = Object.entries(defaultValue)
-                .map(([key, value]) => {
-                    const val = typeof value === "string" ? `'${this.escapeString(value)}'` : String(value);
-                    return `${key}: ${val}`;
-                })
+                .map(([key, value]) => `${emitObjectKey(key)}: ${this.generateDefaultValue(value)}`)
                 .join(", ");
             return `{ ${entries} }`;
         }
         return "undefined";
     }
 
-    private escapeString(str: string): string {
-        return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n");
-    }
+}
+/** Strips the `/.../` delimiters some specs wrap a pattern in. */
+function stripRegexDelimiters(pattern: string): string {
+    return pattern.replace(/^\/|\/$/g, "");
+}
 
-    private escapeRegex(pattern: string): string {
-        const cleaned = pattern.replace(/^\/|\/$/g, "");
-        return cleaned.replace(/\\/g, "\\\\");
+/**
+ * An enum member as a zod literal.
+ *
+ * Enum values are untrusted JSON: `String(v)` of an object emitted
+ * `[object Object]` straight into the source, and of a crafted string put the
+ * value in expression position. Strings are quoted, finite numbers and booleans
+ * pass through, and anything else becomes its JSON form as a string.
+ */
+function emitEnumMember(value: unknown): string {
+    if (typeof value === "string") {
+        return quoteLiteral(value);
     }
+    if (typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) {
+        return String(value);
+    }
+    return quoteLiteral(JSON.stringify(value) ?? String(value));
 }

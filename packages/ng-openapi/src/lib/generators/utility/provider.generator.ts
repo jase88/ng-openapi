@@ -1,6 +1,10 @@
 import { OptionalKind, Project, PropertySignatureStructure, SourceFile } from "ts-morph";
 import * as path from "path";
 import {
+    clientNameIdentifier,
+    effectiveClientName,
+    emitDocs,
+    escapeJsDoc,
     GeneratorConfig,
     getBasePathTokenName,
     getInterceptorsTokenName,
@@ -15,7 +19,7 @@ export class ProviderGenerator {
     constructor(project: Project, config: GeneratorConfig) {
         this.project = project;
         this.config = config;
-        this.clientName = config.clientName || "default";
+        this.clientName = effectiveClientName(config.clientName);
     }
 
     generate(outputDir: string): void {
@@ -24,7 +28,7 @@ export class ProviderGenerator {
 
         const basePathTokenName = getBasePathTokenName(this.clientName);
         const interceptorsTokenName = getInterceptorsTokenName(this.clientName);
-        const baseInterceptorClassName = `${this.capitalizeFirst(this.clientName)}BaseInterceptor`;
+        const baseInterceptorClassName = `${clientNameIdentifier(this.clientName)}BaseInterceptor`;
 
         // Add imports
         sourceFile.addImportDeclarations([
@@ -88,9 +92,9 @@ export class ProviderGenerator {
         }
 
         sourceFile.addInterface({
-            name: `${this.capitalizeFirst(this.clientName)}Config`,
+            name: `${clientNameIdentifier(this.clientName)}Config`,
             isExported: true,
-            docs: [`Configuration options for ${this.clientName} client`],
+            docs: emitDocs(`Configuration options for ${this.clientName} client`),
             properties: configProperties,
         });
 
@@ -99,7 +103,6 @@ export class ProviderGenerator {
 
         sourceFile.insertText(0, PROVIDER_GENERATOR_HEADER_COMMENT);
         sourceFile.formatText();
-        sourceFile.saveSync();
     }
 
     private addMainProviderFunction(
@@ -109,8 +112,8 @@ export class ProviderGenerator {
         baseInterceptorClassName: string,
     ): void {
         const hasDateInterceptor = this.config.options.dateType === "Date";
-        const functionName = `provide${this.capitalizeFirst(this.clientName)}Client`;
-        const configTypeName = `${this.capitalizeFirst(this.clientName)}Config`;
+        const functionName = `provide${clientNameIdentifier(this.clientName)}Client`;
+        const configTypeName = `${clientNameIdentifier(this.clientName)}Config`;
 
         const functionBody = `
 const providers: Provider[] = [
@@ -168,7 +171,7 @@ return makeEnvironmentProviders(providers);`;
             name: functionName,
             isExported: true,
             docs: [
-                `Provides configuration for ${this.clientName} client`,
+                `Provides configuration for ${escapeJsDoc(this.clientName)} client`,
                 "",
                 "@example",
                 "```typescript",
@@ -215,9 +218,5 @@ return makeEnvironmentProviders(providers);`;
                 statements: `return ${functionName}(config);`,
             });
         }
-    }
-
-    private capitalizeFirst(str: string): string {
-        return str.charAt(0).toUpperCase() + str.slice(1);
     }
 }

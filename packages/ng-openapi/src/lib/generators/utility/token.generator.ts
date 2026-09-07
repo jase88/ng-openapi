@@ -1,13 +1,21 @@
 import { Project, VariableDeclarationKind } from "ts-morph";
 import * as path from "path";
+import {
+    effectiveClientName,
+    escapeJsDoc,
+    getBasePathTokenName,
+    getClientContextTokenName,
+    getInterceptorsTokenName,
+    quoteLiteral,
+} from "@ng-openapi/shared";
 
 export class TokenGenerator {
     private project: Project;
     private clientName: string;
 
-    constructor(project: Project, clientName = "default") {
+    constructor(project: Project, clientName?: string) {
         this.project = project;
-        this.clientName = clientName;
+        this.clientName = effectiveClientName(clientName);
     }
 
     generate(outputDir: string): void {
@@ -28,9 +36,9 @@ export class TokenGenerator {
         ]);
 
         // Generate client-specific tokens
-        const basePathTokenName = this.getBasePathTokenName();
-        const interceptorsTokenName = this.getInterceptorsTokenName();
-        const clientContextTokenName = this.getClientContextTokenName();
+        const basePathTokenName = getBasePathTokenName(this.clientName);
+        const interceptorsTokenName = getInterceptorsTokenName(this.clientName);
+        const clientContextTokenName = getClientContextTokenName(this.clientName);
 
         sourceFile.addVariableStatement({
             isExported: true,
@@ -45,7 +53,7 @@ export class TokenGenerator {
                 },
             ],
             leadingTrivia: `/**
- * Injection token for the ${this.clientName} client base API path
+ * Injection token for the ${escapeJsDoc(this.clientName)} client base API path
  */\n`,
         });
 
@@ -62,7 +70,7 @@ export class TokenGenerator {
                 },
             ],
             leadingTrivia: `/**
- * Injection token for the ${this.clientName} client HTTP interceptor instances
+ * Injection token for the ${escapeJsDoc(this.clientName)} client HTTP interceptor instances
  */\n`,
         });
 
@@ -73,11 +81,11 @@ export class TokenGenerator {
             declarations: [
                 {
                     name: clientContextTokenName,
-                    initializer: `new HttpContextToken<string>(() => '${this.clientName}')`,
+                    initializer: `new HttpContextToken<string>(() => ${quoteLiteral(this.clientName)})`,
                 },
             ],
             leadingTrivia: `/**
- * HttpContext token to identify requests belonging to the ${this.clientName} client
+ * HttpContext token to identify requests belonging to the ${escapeJsDoc(this.clientName)} client
  */\n`,
         });
 
@@ -113,21 +121,5 @@ export class TokenGenerator {
         }
 
         sourceFile.formatText();
-        sourceFile.saveSync();
-    }
-
-    private getBasePathTokenName(): string {
-        const clientSuffix = this.clientName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
-        return `BASE_PATH_${clientSuffix}`;
-    }
-
-    private getInterceptorsTokenName(): string {
-        const clientSuffix = this.clientName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
-        return `HTTP_INTERCEPTORS_${clientSuffix}`;
-    }
-
-    private getClientContextTokenName(): string {
-        const clientSuffix = this.clientName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
-        return `CLIENT_CONTEXT_TOKEN_${clientSuffix}`;
     }
 }

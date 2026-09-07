@@ -4,15 +4,17 @@ import {
     BASE_INTERCEPTOR_HEADER_COMMENT,
     getClientContextTokenName,
     getInterceptorsTokenName,
+    clientNameIdentifier,
+    effectiveClientName,
 } from "@ng-openapi/shared";
 
 export class BaseInterceptorGenerator {
     readonly #project: Project;
     readonly #clientName: string;
 
-    constructor(project: Project, clientName = "default") {
+    constructor(project: Project, clientName?: string) {
         this.#project = project;
-        this.#clientName = clientName;
+        this.#clientName = effectiveClientName(clientName);
     }
 
     generate(outputDir: string): void {
@@ -44,7 +46,7 @@ export class BaseInterceptorGenerator {
         ]);
 
         sourceFile.addClass({
-            name: `${this.capitalizeFirst(this.#clientName)}BaseInterceptor`,
+            name: `${clientNameIdentifier(this.#clientName)}BaseInterceptor`,
             isExported: true,
             decorators: [
                 {
@@ -102,10 +104,5 @@ export class BaseInterceptorGenerator {
         sourceFile.insertText(0, BASE_INTERCEPTOR_HEADER_COMMENT(this.#clientName));
 
         sourceFile.formatText();
-        sourceFile.saveSync();
-    }
-
-    private capitalizeFirst(str: string): string {
-        return str.charAt(0).toUpperCase() + str.slice(1);
     }
 }

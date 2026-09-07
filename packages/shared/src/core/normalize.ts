@@ -1,10 +1,12 @@
 // Concrete-module imports (not barrels) to keep the core <-> types/utils
 // import graph cycle-free — see swagger-parser.ts for the same rule.
 import { CONTENT_TYPES } from "../utils/content-types.constants";
+import { describeOperation } from "../errors";
 import { extractPaths } from "../utils/functions/extract-paths";
+import type { ResolveParameter } from "../utils/functions/extract-paths";
 import { getResponseInfoFromResponse } from "../utils/functions/extract-swagger-response-type";
 import type { ResponseTypeInfo } from "../utils/functions/extract-swagger-response-type";
-import type { PathInfo, RequestBody, SwaggerDefinition, SwaggerSpec } from "../types/swagger.types";
+import type { Parameter, PathInfo, RequestBody, SwaggerDefinition, SwaggerSpec } from "../types/swagger.types";
 import type { NormalizedOperation } from "../model/operation.model";
 import type { NormalizedSpec } from "../model/spec.model";
 
@@ -16,7 +18,7 @@ type ResolveRef = (ref: string) => SwaggerDefinition | undefined;
  * http-resource body, overloads) — computing it once keeps the derivations
  * identical by construction.
  */
-export function normalizeSpec(spec: SwaggerSpec): NormalizedSpec {
+export function normalizeSpec(spec: SwaggerSpec, onWarning?: (message: string) => void): NormalizedSpec {
     const rawDefinitions = spec.definitions || spec.components?.schemas || {};
     const definitions = Object.fromEntries(
         Object.entries(rawDefinitions).map(([name, definition]) => [name, normalizeSchema(definition)]),
@@ -25,6 +27,7 @@ export function normalizeSpec(spec: SwaggerSpec): NormalizedSpec {
         const parts = ref.split("/");
         return definitions[parts[parts.length - 1]];
     };
+    const resolveParameter = createParameterResolver(spec);
 
     return {
         version: spec.swagger
@@ -33,8 +36,8 @@ export function normalizeSpec(spec: SwaggerSpec): NormalizedSpec {
               ? { type: "openapi", version: spec.openapi }
               : null,
         definitions,
-        operations: extractPaths(spec.paths).map((operation) =>
-            normalizeOperation(normalizeOperationSchemas(operation), resolveReference),
+        operations: extractPaths(spec.paths, undefined, onWarning, resolveParameter).map((operation) =>
+            normalizeOperation(normalizeOperationSchemas(operation), resolveReference, onWarning),
         ),
         resolveReference,
     };
@@ -150,7 +153,12 @@ function normalizeContentSchemas(
     );
 }
 
-function normalizeOperation(operation: PathInfo, resolveRef: ResolveRef): NormalizedOperation {
+function normalizeOperation(
+    operation: PathInfo,
+    resolveRef: ResolveRef,
+    onWarning?: (message: string) => void,
+): NormalizedOperation {
+    warnAboutUnboundParameters(operation, onWarning);
     const content = operation.requestBody?.content;
     const isMultipart = !!content?.[CONTENT_TYPES.MULTIPART];
     const isUrlEncoded = !!content?.[CONTENT_TYPES.FORM_URLENCODED] && !content?.[CONTENT_TYPES.JSON];
@@ -164,17 +172,22 @@ function normalizeOperation(operation: PathInfo, resolveRef: ResolveRef): Normal
 
     const responseInfo = determineResponseInfo(operation);
 
+    const pathParams = operation.parameters?.filter((p) => p.in === "path") || [];
+    const queryParams = operation.parameters?.filter((p) => p.in === "query") || [];
+    const formDataFields = Object.keys(formDataSchema?.properties || {});
+    const urlEncodedFields = Object.keys(urlEncodedSchema?.properties || {});
+
     return {
         ...operation,
-        pathParams: operation.parameters?.filter((p) => p.in === "path") || [],
-        queryParams: operation.parameters?.filter((p) => p.in === "query") || [],
+        pathParams,
+        queryParams,
         hasBody: !!operation.requestBody,
         isMultipart,
         isUrlEncoded,
         formDataSchema,
-        formDataFields: Object.keys(formDataSchema?.properties || {}),
+        formDataFields,
         urlEncodedSchema,
-        urlEncodedFields: Object.keys(urlEncodedSchema?.properties || {}),
+        urlEncodedFields,
         responseType: responseInfo.responseType,
         acceptHeader: responseInfo.acceptHeader,
     };
@@ -200,4 +213,103 @@ function determineResponseInfo(operation: PathInfo): ResponseTypeInfo {
     }
 
     return { responseType: "json" };
+}
+
+/**
+ * Resolves `$ref` parameters against the document's reusable parameters:
+ * `components.parameters` in OpenAPI 3, top-level `parameters` in Swagger 2.0.
+ *
+ * Matches the whole pointer, not its last segment. `#/components/schemas/Foo`
+ * and `common.yaml#/components/parameters/Foo` must not bind a local
+ * parameter that happens to be called Foo: that sent a different parameter
+ * on the wire with no warning. A component may itself be a Reference
+ * Object, so the chain is followed, with a cycle guard — otherwise A → B
+ * was reported as a parameter with no name, which it has, one step away.
+ */
+function createParameterResolver(spec: SwaggerSpec): ResolveParameter {
+    // Read untyped: the raw spec types do not model either map fully, and a
+    // wrong shape must not throw here.
+    const components: Record<string, unknown> =
+        (spec.swagger
+            ? (spec as { parameters?: Record<string, unknown> }).parameters
+            : (spec as { components?: { parameters?: Record<string, unknown> } }).components?.parameters) ?? {};
+    const prefix = spec.swagger ? "#/parameters/" : "#/components/parameters/";
+
+    return (ref) => {
+        const chain: string[] = [];
+        let current = ref;
+        for (;;) {
+            if (chain.includes(current)) {
+                return {
+                    problem: `is part of a reference cycle (${[...chain, current].map((r) => `"${r}"`).join(" -> ")})`,
+                };
+            }
+            chain.push(current);
+            const hash = current.indexOf("#");
+            if (hash > 0) {
+                return {
+                    problem:
+                        `points into another document ("${current.slice(0, hash)}"); references into other documents ` +
+                        "are not supported, so bundle the spec into one document first",
+                };
+            }
+            if (!current.startsWith(prefix)) {
+                return { problem: `is not a parameter component pointer (expected "${prefix}<name>")` };
+            }
+            // JSON-pointer unescaping, so a component named "a/b" is reachable.
+            const name = current.slice(prefix.length).replace(/~1/g, "/").replace(/~0/g, "~");
+            const candidate = Object.prototype.hasOwnProperty.call(components, name) ? components[name] : undefined;
+            if (!candidate || typeof candidate !== "object") {
+                return { problem: `does not resolve: there is no parameter component named "${name}"` };
+            }
+            const next = (candidate as { $ref?: unknown }).$ref;
+            if (typeof next === "string") {
+                current = next;
+                continue;
+            }
+            return { parameter: candidate as Parameter };
+        }
+    };
+}
+
+/**
+ * Parameters no generated client binds. Every client — the service
+ * generator and the resource plugin alike — takes path and query parameters
+ * from `pathParams`/`queryParams` and the body from `requestBody`; anything
+ * else on `parameters` is carried for the zod plugin but reaches no
+ * signature. Warned here, once per run, so a plugin-only run sees it too:
+ * the check used to live in the service generator, and
+ * `generateServices: false` with the httpResource plugin lost a required
+ * upload with zero warnings.
+ *
+ * Header and cookie parameters are expressible through the trailing options
+ * argument, so only required ones — which the signature then fails to
+ * mention — warn; warning about every optional header would bury that
+ * case. Swagger 2.0 `formData` and `body` have no such escape hatch and
+ * always warn, as does any `in` that is not a location at all.
+ */
+function warnAboutUnboundParameters(operation: PathInfo, onWarning?: (message: string) => void): void {
+    for (const param of operation.parameters ?? []) {
+        if (param.in === "path" || param.in === "query") {
+            continue;
+        }
+        if (param.in === "header" || param.in === "cookie") {
+            if (param.required) {
+                onWarning?.(
+                    `Required ${param.in} parameter "${param.name}" of ${describeOperation(operation)} is not bound by the ` +
+                        "generated clients — callers must pass it through the trailing options parameter.",
+                );
+            }
+            continue;
+        }
+        const kind =
+            param.in === "formData" || param.in === "body"
+                ? `Swagger 2.0 \`in: ${param.in}\``
+                : `\`in: ${String(param.in)}\``;
+        onWarning?.(
+            `${kind} parameter "${param.name}" of ${describeOperation(operation)} is not supported and was dropped` +
+                (param.required ? " (it is marked required)" : "") +
+                ". Describe it as a requestBody, or as a path or query parameter, to have it generated.",
+        );
+    }
 }

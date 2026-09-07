@@ -17,7 +17,7 @@ Every generation run flows through the same stages:
   or URL. Pure I/O; throws `SpecLoadError`.
 - **Parse** (`spec-format.ts`) — format detection + JSON/YAML parsing into a raw
   `SwaggerSpec`. Pure functions; throws `SpecParseError`.
-- **Normalize** (`normalize.ts`) — resolves *every* Swagger 2.0 vs OpenAPI 3.x
+- **Normalize** (`normalize.ts`) — resolves _every_ Swagger 2.0 vs OpenAPI 3.x
   difference exactly once and precomputes what generators would otherwise
   re-derive (`pathParams`, `queryParams`, `hasBody`, `isMultipart`,
   `responseType`, resolved `$ref`s, …). Output: **`NormalizedSpec`** /
@@ -35,12 +35,12 @@ Every generation run flows through the same stages:
 Boundaries are enforced by `@nx/enforce-module-boundaries` (scope tags, see
 `eslint.config.mjs`); a violation fails lint.
 
-| Package | Tag | May depend on |
-|---|---|---|
-| `packages/shared` | `scope:shared` | nothing internal |
-| `packages/ng-openapi` | `scope:core` | shared |
-| `packages/plugins/*` | `scope:plugin` | shared |
-| `packages/testing` | `scope:testing` | everything |
+| Package               | Tag             | May depend on    |
+| --------------------- | --------------- | ---------------- |
+| `packages/shared`     | `scope:shared`  | nothing internal |
+| `packages/ng-openapi` | `scope:core`    | shared           |
+| `packages/plugins/*`  | `scope:plugin`  | shared           |
+| `packages/testing`    | `scope:testing` | everything       |
 
 `@ng-openapi/shared` is **bundled, not published**: tsup inlines its sources
 into each publishable package. Its public API is the explicit export list in
@@ -55,6 +55,21 @@ Generators never see `definitions` vs `components.schemas`, body parameters vs
 `requestBody`, or raw `$ref`s — the normalizer already handled them. If a
 generator needs a new per-operation fact, **add it to `NormalizedOperation` in
 the normalizer**, don't re-derive it at the call site.
+
+Argument identifiers are the counter-example that sharpens the rule. A
+parameter's TypeScript identifier is needed where the parameter is declared
+_and_ at every use site (`emit/url.emit.ts`, `emit/query-params.emit.ts`, the
+form-data blocks), and it cannot be derived one name at a time: wire names are
+free-form, so `filter[name]` and `filter.name` both camelCase onto
+`filterName`, and `options[]` collides with the method's own `options`
+parameter. But _which_ names are already taken is a property of the code being
+emitted, not of the spec — the core service binds `observe`/`options`, the
+httpResource plugin binds `resourceOptions`/`requestOptions`. So this one is
+**not** on `NormalizedOperation`: each generator calls
+`resolveArgumentNames(operation, config, <its own ArgumentNameProfile>)`, a pure
+function, and every call site of that generator gets the same answer. Read the
+returned map (`names.of(wireName)`, `names.body`); never `camelCase(param.name)`
+in a generator.
 
 ### Shared emission layer
 
@@ -82,8 +97,16 @@ what keeps the library embeddable and testable.
 
 User-facing failures are typed (`packages/shared/src/errors.ts`):
 `SpecLoadError` (input unreadable), `SpecParseError` (content unusable),
-`ConfigValidationError` (invalid config, collects all issues). Hosts branch on
-`instanceof`, never on message text — messages are presentation.
+`ConfigLoadError` (config file unreadable), `ConfigValidationError` (invalid
+config, collects all issues), `InvalidIdentifierError`,
+`DuplicateGeneratedNameError` and `UnresolvedPathTemplateError` (a name or path
+that cannot be emitted). Hosts branch on `instanceof`, never on message text —
+messages are presentation.
+
+They carry a non-enumerable brand listing their lineage, so `instanceof` also
+recognizes an error thrown by a plugin's own bundled copy of this module.
+`@ng-openapi/shared` is inlined into each published plugin, so the same class
+exists more than once at runtime and the prototype chain alone would not match.
 
 ### Plugin contract
 
@@ -104,6 +127,29 @@ files from earlier runs, and a path-less spec legitimately generates no
 emit a file must remove it from the Project rather than leave it unsaved —
 otherwise it would show up in indexes and `filesWritten`.
 
+### Spec text never reaches emitted code unescaped
+
+Wire names, property names and header values are free-form text. Interpolating
+them into generated source is how #125 kept recurring, in five different
+positions. `packages/shared/src/emit/literal.emit.ts` is the only place that
+decides how: `quoteLiteral` for a string literal, `emitObjectKey` for an
+object-literal key (`__proto__` must be a computed key or it invokes the
+prototype setter and creates no property), `emitPropertyName` for a declaration,
+`escapeTemplateLiteral` inside a template literal, and `emitDocs` for a JSDoc
+block — a description containing `*/` closes the comment, and everything after
+it is emitted as code that compiles. There is deliberately one
+implementation — the four near-copies that preceded it each missed a different
+character, and the one that escaped nothing shipped syntactically invalid
+TypeScript while generation reported success.
+
+### One write per run
+
+Generators build files into the shared `Project` and never save.
+`generateFromConfig` calls `project.save()` once, after every generator has
+succeeded, so a failure leaves the output directory untouched instead of
+half-written. A generator that decides not to emit a file removes it from the
+Project (see above).
+
 ## Safety nets
 
 - **Golden suite** — every generated file from 5 spec fixtures × config
@@ -118,13 +164,16 @@ otherwise it would show up in indexes and `filesWritten`.
 
 ## Where does X go?
 
-| You're adding… | It goes… |
-|---|---|
-| A new per-operation derived fact | `normalize.ts` + `NormalizedOperation` |
-| A code fragment used by ≥2 generators | `packages/shared/src/emit/` |
-| A new generator option | `GeneratorConfig` + the narrow view that consumes it + `config-validation.ts` |
-| A new output file kind for the core | a generator under `packages/ng-openapi/src/lib/generators/` |
-| An alternative client flavor | a plugin package implementing `PluginGeneratorContext` |
-| A new user-facing failure mode | a typed error in `packages/shared/src/errors.ts` (or extend an existing one) |
-| A string/name helper | `packages/shared/src/utils/` — and export it from the barrel only if consumers outside shared need it |
-| Console output | `cli.ts`. Nowhere else. |
+| You're adding…                                 | It goes…                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A new per-operation derived fact               | `normalize.ts` + `NormalizedOperation`                                                                                                                                                                                                                                                                                                                                                                                               |
+| A code fragment used by ≥2 generators          | `packages/shared/src/emit/`                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Anything that puts spec text into emitted code | `emit/literal.emit.ts` — never a local escaper                                                                                                                                                                                                                                                                                                                                                                                       |
+| A new generator option                         | `GeneratorConfig` + the narrow view that consumes it + `config-validation.ts`                                                                                                                                                                                                                                                                                                                                                        |
+| A new output file kind for the core            | a generator under `packages/ng-openapi/src/lib/generators/`                                                                                                                                                                                                                                                                                                                                                                          |
+| An alternative client flavor                   | a plugin package implementing `PluginGeneratorContext`                                                                                                                                                                                                                                                                                                                                                                               |
+| A new user-facing failure mode                 | a typed error in `packages/shared/src/errors.ts` (or extend an existing one)                                                                                                                                                                                                                                                                                                                                                         |
+| A string/name helper                           | `packages/shared/src/utils/` — and export it from the barrel only if consumers outside shared need it                                                                                                                                                                                                                                                                                                                                |
+| A rule about which generated names may coexist | `packages/shared/src/utils/functions/` — `argument-names.ts` (parameters, per-emitter profile), `method-names.ts` (methods vs. class members), `controller-groups.ts` (files, case-insensitive), `distinct-member-names.ts` (the shared assertion). The _rule_ lives here once; a generator may keep its own bookkeeping of names it has already handed out (`ModelFileRegistry`, `reserveInterfaceName`, `assertDistinctTypeNames`) |
+| Console output                                 | `cli.ts`. Nowhere else.                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Config-file loading / normalizing              | `core/config-loader.ts` — not `cli.ts`, which runs the CLI on import and so cannot be tested                                                                                                                                                                                                                                                                                                                                         |
