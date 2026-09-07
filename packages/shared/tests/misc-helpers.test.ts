@@ -5,6 +5,8 @@ import {
     getBasePathTokenName,
     getClientContextTokenName,
     getInterceptorsTokenName,
+    clientNameIdentifier,
+    effectiveClientName,
     hasDuplicateFunctionNames,
     isDataTypeInterface,
 } from "../src";
@@ -56,14 +58,35 @@ describe("generateParseRequestTypeParams", () => {
     });
 });
 
-describe("hasDuplicateFunctionNames", () => {
-    const functionsOf = (code: string) => {
-        const project = new Project({ useInMemoryFileSystem: true });
-        return project.createSourceFile("x.ts", code).getFunctions();
-    };
+describe("effectiveClientName", () => {
+    it("treats undefined and empty alike", () => {
+        expect(effectiveClientName(undefined)).toBe("default");
+        expect(effectiveClientName("")).toBe("default");
+        expect(effectiveClientName("PetsApi")).toBe("PetsApi");
+        expect(getBasePathTokenName("")).toBe("BASE_PATH_DEFAULT");
+    });
+});
 
-    it("detects duplicate names", () => {
-        expect(hasDuplicateFunctionNames(functionsOf("function a() {}\nfunction b() {}"))).toBe(false);
-        expect(hasDuplicateFunctionNames(functionsOf("function a() {}\nfunction a() {}"))).toBe(true);
+describe("clientNameIdentifier", () => {
+    it("keeps an identifier verbatim apart from its first character", () => {
+        // What consumers import: sending these through pascalCase renamed them.
+        expect(clientNameIdentifier("my_client")).toBe("My_client");
+        expect(clientNameIdentifier("_internal")).toBe("_internal");
+        expect(clientNameIdentifier("A1_b")).toBe("A1_b");
+    });
+
+    it("sanitizes only what could not have compiled", () => {
+        expect(clientNameIdentifier("my-client")).toBe("MyClient");
+        expect(clientNameIdentifier("my client")).toBe("MyClient");
+        expect(clientNameIdentifier("2fa")).toBe("_2fa");
+    });
+});
+
+describe("hasDuplicateFunctionNames (deprecated, kept as public API)", () => {
+    it("still answers", () => {
+        const fns = new Project({ useInMemoryFileSystem: true })
+            .createSourceFile("x.ts", "function a() {}\nfunction a() {}")
+            .getFunctions();
+        expect(hasDuplicateFunctionNames(fns)).toBe(true);
     });
 });

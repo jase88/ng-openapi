@@ -39,6 +39,6 @@ describe("SwaggerParser.create when $ref inlining blows up", () => {
         expect(error).toBeInstanceOf(SpecParseError);
         expect((error as SpecParseError).source).toBe(specPath);
         expect((error as Error).message).toContain("Maximum call stack size exceeded");
-        expect((error as Error).cause).toBeInstanceOf(RangeError);
+        expect((error as SpecParseError).cause).toBeInstanceOf(RangeError);
     });
 });

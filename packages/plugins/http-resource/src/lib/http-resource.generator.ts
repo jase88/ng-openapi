@@ -1,17 +1,23 @@
 import { Project, Scope, SourceFile } from "ts-morph";
 import {
     camelCase,
+    describeOperation,
+    quoteLiteral,
+    effectiveClientName,
     emitServiceDecorator,
     GeneratorConfig,
     getBasePathTokenName,
     getClientContextTokenName,
     getResourceClassName,
-    hasDuplicateFunctionNames,
+    groupOperationsByController,
+    assertDistinctMemberNames,
+    reservedMemberCollision,
+    resolveArgumentNames,
+    RESOURCE_ARGUMENT_PROFILE,
     HTTP_RESOURCE_GENERATOR_HEADER_COMMENT,
     IPluginGenerator,
     NormalizedOperation,
     NormalizedSpec,
-    pascalCase,
     PluginGeneratorContext,
 } from "@ng-openapi/shared";
 import * as path from "path";
@@ -45,41 +51,18 @@ export class HttpResourceGenerator implements IPluginGenerator {
             return;
         }
 
-        const controllerGroups = this.groupPathsByController(paths);
+        const controllerGroups = groupOperationsByController(paths, this.onWarning);
 
         await Promise.all(
-            Object.entries(controllerGroups).map(([controllerName, operations]) => {
-                this.generateServiceFile(controllerName, operations, outputDir);
-            }),
+            // Must return the promise: without it Promise.all awaits [undefined],
+            // and a generateServiceFile rejection escapes as an unhandled
+            // rejection while generation reports success.
+            Object.entries(controllerGroups).map(([controllerName, operations]) =>
+                this.generateServiceFile(controllerName, operations, outputDir),
+            ),
         );
 
         this.indexGenerator.generateIndex(outputRoot);
-    }
-
-    private groupPathsByController(paths: NormalizedOperation[]): Record<string, NormalizedOperation[]> {
-        const groups: Record<string, NormalizedOperation[]> = {};
-
-        paths.forEach((path) => {
-            let controllerName = "Default";
-
-            if (path.tags && path.tags.length > 0) {
-                controllerName = path.tags[0];
-            } else {
-                // Extract from path (e.g., "/api/users/{id}" -> "Users")
-                const pathParts = path.path.split("/").filter((p) => p && !p.startsWith("{"));
-                if (pathParts.length > 1) {
-                    controllerName = pascalCase(pathParts[1]);
-                }
-            }
-            controllerName = pascalCase(controllerName);
-
-            if (!groups[controllerName]) {
-                groups[controllerName] = [];
-            }
-            groups[controllerName].push(path);
-        });
-
-        return groups;
     }
 
     private async generateServiceFile(controllerName: string, operations: NormalizedOperation[], outputDir: string) {
@@ -89,8 +72,12 @@ export class HttpResourceGenerator implements IPluginGenerator {
         const sourceFile = this.project.createSourceFile(filePath, "", { overwrite: true });
         this.addServiceClass(sourceFile, controllerName, operations);
         sourceFile.fixMissingImports().formatText(); //TODO: add models
-        sourceFile.insertText(0, HTTP_RESOURCE_GENERATOR_HEADER_COMMENT(getResourceClassName(controllerName, this.config.options.naming?.resources)));
-        sourceFile.saveSync();
+        sourceFile.insertText(
+            0,
+            HTTP_RESOURCE_GENERATOR_HEADER_COMMENT(
+                getResourceClassName(controllerName, this.config.options.naming?.resources),
+            ),
+        );
     }
 
     private addServiceClass(sourceFile: SourceFile, controllerName: string, operations: NormalizedOperation[]): void {
@@ -162,18 +149,37 @@ export class HttpResourceGenerator implements IPluginGenerator {
             ],
             returnType: "HttpContext",
             statements: `const context = existingContext || new HttpContext();
-return context.set(this.clientContextToken, '${this.config.clientName || "default"}');`,
+return context.set(this.clientContextToken, ${quoteLiteral(effectiveClientName(this.config.clientName))});`,
         });
 
         // Generate methods for each operation
         operations.forEach((operation) => {
+            const { renamed, merged } = resolveArgumentNames(operation, this.config, RESOURCE_ARGUMENT_PROFILE);
+            for (const { source, identifier } of renamed) {
+                this.onWarning?.(
+                    `Parameter "${source}" of ${describeOperation(operation)} is exposed as "${identifier}" — ` +
+                        `its natural name is already taken by another parameter or by the resource method itself.`,
+                );
+            }
+            for (const wireName of merged) {
+                this.onWarning?.(
+                    `Parameter "${wireName}" of ${describeOperation(operation)} is declared in more than one ` +
+                        `location; they collapse into one argument, so the first declaration's type wins and ` +
+                        `the same value is sent for both.`,
+                );
+            }
+            const collision = reservedMemberCollision(operation, this.config);
+            if (collision) {
+                this.onWarning?.(
+                    `Operation ${describeOperation(operation)} would be named "${collision.from}", which the generated ` +
+                        `class already binds — it is emitted as "${collision.to}". Rename the operationId to choose the name.`,
+                );
+            }
             this.methodGenerator.addResourceMethod(serviceClass, operation);
         });
 
-        if (hasDuplicateFunctionNames(serviceClass.getMethods())) {
-            throw new Error(
-                `Duplicate method names found in service class ${className}. Please ensure unique method names for each operation.`,
-            );
-        }
+        assertDistinctMemberNames(serviceClass, className, operations, (op) =>
+            this.methodGenerator.generateMethodName(op),
+        );
     }
 }

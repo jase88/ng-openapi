@@ -1,14 +1,20 @@
 import { Project, Scope, SourceFile } from "ts-morph";
 import {
     camelCase,
+    describeOperation,
+    quoteLiteral,
+    effectiveClientName,
     emitServiceDecorator,
     GeneratorConfig,
     getBasePathTokenName,
     getClientContextTokenName,
     getServiceClassName,
-    hasDuplicateFunctionNames,
+    assertDistinctMemberNames,
+    groupOperationsByController,
+    reservedMemberCollision,
+    resolveArgumentNames,
+    SERVICE_ARGUMENT_PROFILE,
     NormalizedOperation,
-    pascalCase,
     SERVICE_GENERATOR_HEADER_COMMENT,
     SwaggerParser,
 } from "@ng-openapi/shared";
@@ -47,10 +53,10 @@ export class ServiceGenerator {
             return;
         }
 
-        const controllerGroups = this.groupPathsByController(paths);
+        const controllerGroups = groupOperationsByController(paths, this.onWarning);
 
         if (this.config.options.useSingleRequestParameter) {
-            const requestParamsGenerator = new RequestParamsGenerator(this.project, this.config);
+            const requestParamsGenerator = new RequestParamsGenerator(this.project, this.config, this.onWarning);
             this.requestObjects = requestParamsGenerator.buildRegistry(controllerGroups, (operation) =>
                 this.methodGenerator.generateMethodName(operation),
             );
@@ -65,33 +71,6 @@ export class ServiceGenerator {
         );
     }
 
-    private groupPathsByController(paths: NormalizedOperation[]): Record<string, NormalizedOperation[]> {
-        const groups: Record<string, NormalizedOperation[]> = {};
-
-        paths.forEach((path) => {
-            let controllerName = "Default";
-
-            if (path.tags && path.tags.length > 0) {
-                controllerName = path.tags[0];
-            } else {
-                // Extract from path (e.g., "/api/users/{id}" -> "Users")
-                const pathParts = path.path.split("/").filter((p) => p && !p.startsWith("{"));
-                if (pathParts.length > 1) {
-                    controllerName = pascalCase(pathParts[1]);
-                }
-            }
-
-            controllerName = pascalCase(controllerName);
-
-            if (!groups[controllerName]) {
-                groups[controllerName] = [];
-            }
-            groups[controllerName].push(path);
-        });
-
-        return groups;
-    }
-
     private async generateServiceFile(controllerName: string, operations: NormalizedOperation[], outputDir: string) {
         const fileName = `${camelCase(controllerName)}.service.ts`;
         const filePath = path.join(outputDir, fileName);
@@ -102,7 +81,30 @@ export class ServiceGenerator {
 
         sourceFile.fixMissingImports().formatText(); //TODO: add models
         sourceFile.insertText(0, SERVICE_GENERATOR_HEADER_COMMENT(controllerName));
-        sourceFile.saveSync();
+    }
+
+    /**
+     * A renamed argument is part of the method's public signature, and the
+     * suffix depends on which other arguments the operation has — so adding or
+     * removing one renumbers the survivor and breaks call sites. Silent is the
+     * one thing that must not happen.
+     */
+    private warnAboutRenamedArguments(operation: NormalizedOperation): void {
+        const { renamed, merged } = resolveArgumentNames(operation, this.config, SERVICE_ARGUMENT_PROFILE);
+        for (const { source, identifier } of renamed) {
+            this.onWarning?.(
+                `Parameter "${source}" of ${describeOperation(operation)} is exposed as "${identifier}" — ` +
+                    `its natural name is already taken by another parameter or by the method itself. ` +
+                    `Renaming it in the spec keeps the generated signature stable.`,
+            );
+        }
+        for (const wireName of merged) {
+            this.onWarning?.(
+                `Parameter "${wireName}" of ${describeOperation(operation)} is declared in more than one ` +
+                    `location; they collapse into one argument, so the first declaration's type wins and the ` +
+                    `same value is sent for both.`,
+            );
+        }
     }
 
     private addServiceClass(sourceFile: SourceFile, controllerName: string, operations: NormalizedOperation[]): void {
@@ -110,7 +112,6 @@ export class ServiceGenerator {
         const basePathTokenName = getBasePathTokenName(this.config.clientName);
         const clientContextTokenName = getClientContextTokenName(this.config.clientName);
         const serviceDecorator = emitServiceDecorator(this.config.options);
-
 
         sourceFile.addImportDeclarations([
             {
@@ -186,17 +187,32 @@ export class ServiceGenerator {
             ],
             returnType: "HttpContext",
             statements: `const context = existingContext || new HttpContext();
-return context.set(this.clientContextToken, '${this.config.clientName || "default"}');`,
+return context.set(this.clientContextToken, ${quoteLiteral(effectiveClientName(this.config.clientName))});`,
         });
 
         // Generate methods for each operation
         operations.forEach((operation) => {
+            this.warnAboutRenamedArguments(operation);
+            this.warnAboutReservedMethodName(operation);
             this.methodGenerator.addServiceMethod(serviceClass, operation, this.requestObjects?.get(operation));
         });
 
-        if (hasDuplicateFunctionNames(serviceClass.getMethods())) {
-            throw new Error(
-                `Duplicate method names found in service class ${className}. Please ensure unique method names for each operation.`,
+        assertDistinctMemberNames(serviceClass, className, operations, (op) =>
+            this.methodGenerator.generateMethodName(op),
+        );
+    }
+
+    /**
+     * A derived method name that landed on a member the class binds itself is
+     * prefixed rather than rejected — the spec is valid — but the rename is
+     * public signature and must be said out loud.
+     */
+    private warnAboutReservedMethodName(operation: NormalizedOperation): void {
+        const collision = reservedMemberCollision(operation, this.config);
+        if (collision) {
+            this.onWarning?.(
+                `Operation ${describeOperation(operation)} would be named "${collision.from}", which the generated ` +
+                    `class already binds — it is emitted as "${collision.to}". Rename the operationId to choose the name.`,
             );
         }
     }

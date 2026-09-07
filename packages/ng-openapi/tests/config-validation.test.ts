@@ -7,7 +7,7 @@ const validConfig = {
     options: { dateType: "string", enumStyle: "union" },
 };
 
-const issuesOf = (config: unknown): string[] => {
+const issuesOf = (config: unknown): readonly string[] => {
     try {
         validateGeneratorConfig(config);
         return [];
@@ -138,5 +138,14 @@ describe("validateGeneratorConfig", () => {
             expect((error as ConfigValidationError).issues.length).toBeGreaterThanOrEqual(3);
             expect((error as Error).message).toContain("Invalid ng-openapi configuration");
         }
+    });
+    it("accepts any string as clientName", () => {
+        // Free-form on purpose: every identifier derived from it is sanitized
+        // downstream, and "my-client" generated fine before — rejecting it here
+        // was a breaking change. The only structural requirement is the type.
+        for (const clientName of ["PetsApi", "_internal", "my-client", "a.b", "2fa", "My (Api)"]) {
+            expect(issuesOf({ ...validConfig, clientName }), clientName).toEqual([]);
+        }
+        expect(issuesOf({ ...validConfig, clientName: 42 })).toContainEqual(expect.stringContaining("`clientName`"));
     });
 });

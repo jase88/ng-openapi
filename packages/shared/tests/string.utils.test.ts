@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { camelCase, kebabCase, pascalCase, pascalCaseForEnums, screamingSnakeCase } from "../src";
+import {
+    camelCase,
+    capitalizeFirst,
+    isValidIdentifier,
+    kebabCase,
+    pascalCase,
+    pascalCaseForEnums,
+    screamingSnakeCase,
+} from "../src";
 
 describe("camelCase", () => {
     it("converts kebab-case", () => {
@@ -30,6 +38,34 @@ describe("camelCase", () => {
     it("handles trailing separators", () => {
         expect(camelCase("user-")).toBe("user");
     });
+
+    // #125: braces in an operationId reached the emitted method name verbatim
+    it("treats characters illegal in an identifier as separators (#125)", () => {
+        expect(camelCase("groups_{group_id}_delete")).toBe("groupsGroupIdDelete");
+        expect(camelCase("get/pets:byStatus")).toBe("getPetsByStatus");
+        expect(camelCase("weird name!x")).toBe("weirdNameX");
+    });
+
+    it("prefixes a leading digit", () => {
+        expect(camelCase("2fa_verify")).toBe("_2faVerify");
+    });
+
+    it("keeps $, which is legal in an identifier", () => {
+        expect(camelCase("$top")).toBe("$top");
+        expect(camelCase("$select")).toBe("$select");
+    });
+
+    it("keeps Unicode letters, which are legal in an identifier", () => {
+        expect(camelCase("größe")).toBe("größe");
+        expect(camelCase("benutzer_größe")).toBe("benutzerGröße");
+    });
+
+    it("falls back to _ when nothing identifier-legal remains", () => {
+        expect(camelCase("{}")).toBe("_");
+        // "" is not an identifier for any input, and it is reachable: a
+        // parameter named "" is legal spec JSON.
+        expect(camelCase("")).toBe("_");
+    });
 });
 
 describe("pascalCase", () => {
@@ -47,6 +83,37 @@ describe("pascalCase", () => {
 
     it("collapses consecutive separators", () => {
         expect(pascalCase("a--b__c")).toBe("ABC");
+    });
+
+    // #125: a tag like this became the class name `Groups(yes)Service`
+    it("treats characters illegal in an identifier as separators (#125)", () => {
+        expect(pascalCase("Groups (yes)")).toBe("GroupsYes");
+        expect(pascalCase("Pet Store & Co.")).toBe("PetStoreCo");
+    });
+
+    it("prefixes a leading digit", () => {
+        expect(pascalCase("3d-models")).toBe("_3dModels");
+    });
+
+    it("falls back to _ when nothing identifier-legal remains", () => {
+        expect(pascalCase("()")).toBe("_");
+        // "" is not an identifier for any input, and it is reachable: a
+        // parameter named "" is legal spec JSON.
+        expect(pascalCase("")).toBe("_");
+    });
+});
+
+describe("isValidIdentifier", () => {
+    it("accepts identifiers TypeScript accepts", () => {
+        for (const name of ["getPets", "_private", "$top", "größe", "a1"]) {
+            expect(isValidIdentifier(name), name).toBe(true);
+        }
+    });
+
+    it("rejects empty, digit-leading and punctuated names", () => {
+        for (const name of ["", "2fa", "get pets", "groups{groupId}Delete", "a-b"]) {
+            expect(isValidIdentifier(name), name).toBe(false);
+        }
     });
 });
 
@@ -93,5 +160,17 @@ describe("pascalCaseForEnums", () => {
 
     it("keeps already valid PascalCase names", () => {
         expect(pascalCaseForEnums("OrderStatus")).toBe("OrderStatus");
+    });
+
+    it("never returns an empty name", () => {
+        // A schema named "" emitted `export interface  {`.
+        expect(pascalCaseForEnums("")).toBe("_");
+    });
+});
+
+describe("capitalizeFirst", () => {
+    it("touches only the first character", () => {
+        expect(capitalizeFirst("my_client")).toBe("My_client");
+        expect(capitalizeFirst("")).toBe("");
     });
 });

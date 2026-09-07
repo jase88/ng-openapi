@@ -1,4 +1,8 @@
-import { GeneratorConfig } from "@ng-openapi/shared";
+import { ConfigValidationError, GeneratorConfig } from "@ng-openapi/shared";
+
+// Re-exported for hosts that import it from here; the class itself lives in
+// shared/errors.ts so it joins the branded NgOpenApiError hierarchy.
+export { ConfigValidationError };
 
 const RESPONSE_TYPES = ["json", "blob", "arraybuffer", "text"] as const;
 
@@ -7,21 +11,6 @@ const NAMING_KEYS = ["services", "resources", "models"] as const;
 // identifier fragments themselves; the prefix additionally starts the name.
 const NAME_PREFIX_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NAME_SUFFIX_PATTERN = /^[A-Za-z0-9_]*$/;
-
-/**
- * Thrown when the user-supplied config is structurally invalid. Collects every
- * issue instead of failing on the first one, so a config file can be fixed in
- * one pass.
- */
-export class ConfigValidationError extends Error {
-    readonly issues: string[];
-
-    constructor(issues: string[]) {
-        super(`Invalid ng-openapi configuration:\n${issues.map((issue) => `  - ${issue}`).join("\n")}`);
-        this.name = "ConfigValidationError";
-        this.issues = issues;
-    }
-}
 
 /**
  * Validates a config object at the user boundary (CLI config file or
@@ -46,6 +35,11 @@ export function validateGeneratorConfig(config: unknown): asserts config is Gene
     if (typeof c.output !== "string" || c.output.trim() === "") {
         issues.push("`output` must be a non-empty string (output directory)");
     }
+    // Free-form on purpose. It is not an identifier: identifiers derived from it
+    // go through clientNameIdentifier and the token-name helpers, every comment
+    // it reaches goes through escapeJsDoc, and every string literal through
+    // quoteLiteral. Rejecting names such as "my-client" here broke configs that
+    // generated fine before.
     if (c.clientName !== undefined && typeof c.clientName !== "string") {
         issues.push("`clientName` must be a string");
     }
@@ -131,7 +125,10 @@ export function validateGeneratorConfig(config: unknown): asserts config is Gene
             }
         }
 
-        if (options.validation !== undefined && (typeof options.validation !== "object" || options.validation === null)) {
+        if (
+            options.validation !== undefined &&
+            (typeof options.validation !== "object" || options.validation === null)
+        ) {
             issues.push("`options.validation` must be an object like { response?: boolean }");
         }
 

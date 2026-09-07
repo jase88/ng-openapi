@@ -1,5 +1,13 @@
 // String casing
-export { camelCase, kebabCase, pascalCase, pascalCaseForEnums, screamingSnakeCase } from "./string.utils";
+export {
+    camelCase,
+    capitalizeFirst,
+    isValidIdentifier,
+    kebabCase,
+    pascalCase,
+    pascalCaseForEnums,
+    screamingSnakeCase,
+} from "./string.utils";
 // Swagger/OpenAPI → TypeScript type mapping
 export { escapeString, getTypeScriptType, nullableType } from "./type.utils";
 // Content-type constants
@@ -11,19 +19,29 @@ export {
     extractPaths,
     generateParseRequestTypeParams,
     getBasePathTokenName,
+    clientNameIdentifier,
+    effectiveClientName,
     getClientContextTokenName,
     getInterceptorsTokenName,
     getModelTypeName,
+    assertDistinctMemberNames,
+    getOperationMethodName,
+    RESERVED_MEMBER_NAMES,
+    reservedMemberCollision,
     getRequestBodyType,
     getResourceClassName,
     getServiceClassName,
     getResponseInfoFromResponse,
     getResponseType,
     getResponseTypeFromResponse,
+    groupOperationsByController,
     hasDuplicateFunctionNames,
     inferResponseTypeFromContentType,
     isDataTypeInterface,
     isPrimitiveType,
     isUrl,
+    RESOURCE_ARGUMENT_PROFILE,
+    resolveArgumentNames,
+    SERVICE_ARGUMENT_PROFILE,
 } from "./functions";
-export type { ResponseTypeInfo } from "./functions";
+export type { ArgumentNameProfile, ArgumentNames, RenamedArgument, ResponseTypeInfo } from "./functions";

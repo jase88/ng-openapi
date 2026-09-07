@@ -1,5 +1,19 @@
-import { SwaggerDefinition, SwaggerParser, TYPE_GENERATOR_HEADER_COMMENT, TypeGenOptions } from "@ng-openapi/shared";
-import { ImportDeclarationStructure, OptionalKind, Project, SourceFile, StatementStructures, StructureKind } from "ts-morph";
+import {
+    emitDocs,
+    DuplicateGeneratedNameError,
+    SwaggerDefinition,
+    SwaggerParser,
+    TYPE_GENERATOR_HEADER_COMMENT,
+    TypeGenOptions,
+} from "@ng-openapi/shared";
+import {
+    ImportDeclarationStructure,
+    OptionalKind,
+    Project,
+    SourceFile,
+    StatementStructures,
+    StructureKind,
+} from "ts-morph";
 import { EnumBuilder } from "./enum-builder";
 import { InterfaceBuilder } from "./interface-builder";
 import { ModelFileRegistry } from "./model-file-registry";
@@ -46,33 +60,56 @@ export class TypeGenerator {
     }
 
     async generate() {
-        try {
-            const definitions = this.parser.getNormalizedSpec().definitions;
-            if (!definitions || Object.keys(definitions).length === 0) {
-                this.onWarning?.("No definitions found in swagger file");
-            }
-
-            if (this.config.options.modelFileStructure === "per-type") {
-                this.generatePerType(definitions);
-                return;
-            }
-
-            // Phase 1: Collect all type structures in memory (no AST manipulation yet)
-            Object.entries(definitions).forEach(([name, definition]) => {
-                this.statements.push(...this.collectTypeStructure(name, definition));
-            });
-
-            // Phase 2: Add SDK types
-            this.statements.push(...buildSdkTypes(this.config));
-
-            // Phase 3: Single batch AST update
-            this.applyBatchUpdates();
-
-            // Phase 4: Format and save
-            await this.finalize();
-        } catch (error) {
-            throw new Error(`Failed to generate types: ${error instanceof Error ? error.message : "Unknown error"}`);
+        const definitions = this.parser.getNormalizedSpec().definitions;
+        if (!definitions || Object.keys(definitions).length === 0) {
+            this.onWarning?.("No definitions found in swagger file");
         }
+        this.assertDistinctTypeNames(definitions);
+
+        if (this.config.options.modelFileStructure === "per-type") {
+            this.generatePerType(definitions);
+            return;
+        }
+
+        // Phase 1: Collect all type structures in memory (no AST manipulation yet)
+        Object.entries(definitions).forEach(([name, definition]) => {
+            this.statements.push(...this.collectTypeStructure(name, definition));
+        });
+
+        // Phase 2: Add SDK types
+        this.statements.push(...buildSdkTypes(this.config));
+
+        // Phase 3: Single batch AST update
+        this.applyBatchUpdates();
+
+        // Phase 4: Format and save
+        await this.finalize();
+    }
+
+    /**
+     * Two schemas whose names sanitize onto one type name (`Pet-Store` and
+     * `Pet.Store` both become `Pet_Store`) would emit two declarations of one
+     * interface — and TypeScript declaration-merges those, so the compile
+     * check cannot see it and one model silently acquires the other's
+     * properties. Worse than a hard error, hence a hard error.
+     */
+    private assertDistinctTypeNames(definitions: Record<string, SwaggerDefinition>): void {
+        const rawByType = new Map<string, string[]>();
+        for (const rawName of Object.keys(definitions)) {
+            const typeName = this.resolver.pascalName(rawName);
+            rawByType.set(typeName, [...(rawByType.get(typeName) ?? []), rawName]);
+        }
+        const collisions = [...rawByType].filter(([, raws]) => raws.length > 1);
+        if (collisions.length === 0) {
+            return;
+        }
+        const detail = collisions
+            .map(([typeName, raws]) => `"${typeName}" from schemas ${raws.map((raw) => `"${raw}"`).join(" and ")}`)
+            .join("; ");
+        throw new DuplicateGeneratedNameError(
+            `Schemas map to the same type name: ${detail}. Rename one schema to keep them apart.`,
+            collisions.map(([typeName]) => typeName),
+        );
     }
 
     private collectTypeStructure(name: string, definition: SwaggerDefinition): StatementStructures[] {
@@ -92,7 +129,7 @@ export class TypeGenerator {
                     kind: StructureKind.TypeAlias,
                     name: typeName,
                     isExported: true,
-                    docs: definition.description ? [definition.description] : undefined,
+                    docs: emitDocs(definition.description),
                     type: this.resolver.resolve(definition),
                 },
             ];
@@ -114,7 +151,7 @@ export class TypeGenerator {
             name,
             type: typeExpression,
             isExported: true,
-            docs: definition.description ? [definition.description] : undefined,
+            docs: emitDocs(definition.description),
         };
     }
 
@@ -125,7 +162,7 @@ export class TypeGenerator {
             kind: StructureKind.TypeAlias,
             name,
             isExported: true,
-            docs: definition.description ? [definition.description] : undefined,
+            docs: emitDocs(definition.description),
             type: `Array<${itemType}>`,
         };
     }
@@ -137,11 +174,12 @@ export class TypeGenerator {
         this.sourceFile.addStatements(this.statements);
     }
 
-    private async finalize(): Promise<void> {
+    private finalize(): void {
         // Format only once at the end
         this.sourceFile.formatText();
-        this.sourceFile.insertText(0, TYPE_GENERATOR_HEADER_COMMENT)
-        await this.sourceFile.save();
+        this.sourceFile.insertText(0, TYPE_GENERATOR_HEADER_COMMENT);
+        // No save here: generateFromConfig writes the whole Project once, after
+        // every generator has succeeded.
     }
 
     private generatePerType(definitions: Record<string, SwaggerDefinition>): void {
@@ -254,6 +292,5 @@ export class TypeGenerator {
     private finalizeModelSourceFile(sourceFile: SourceFile): void {
         sourceFile.formatText();
         sourceFile.insertText(0, TYPE_GENERATOR_HEADER_COMMENT);
-        sourceFile.saveSync();
     }
 }

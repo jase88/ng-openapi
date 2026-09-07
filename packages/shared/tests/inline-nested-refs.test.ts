@@ -48,13 +48,27 @@ function specWithResponseRef(ref: string, schemas: unknown): SwaggerSpec {
     } as unknown as SwaggerSpec;
 }
 
+/**
+ * A raw operation, typed loosely. The spec types model responses and
+ * parameters as `Reference | …` unions, so reading `.schema` through them
+ * needs a cast anyway; these tests only ever read inlined output.
+ */
+interface LooseOperation {
+    parameters?: Array<{ schema?: unknown }>;
+    responses?: Record<string, { schema?: unknown; content?: Record<string, { schema?: unknown }> } | undefined>;
+}
+
+function operation(spec: SwaggerSpec, path: string, method: "get" | "put"): LooseOperation | undefined {
+    return (spec.paths[path] as Record<string, LooseOperation | undefined>)[method];
+}
+
 function responseSchema(spec: SwaggerSpec): unknown {
-    return spec.paths["/x"].get?.responses?.["200"]?.content?.["application/json"]?.schema;
+    return operation(spec, "/x", "get")?.responses?.["200"]?.content?.["application/json"]?.schema;
 }
 
 /** Overwrites the schema `specWithResponseRef` built, for the odd shapes below. */
 function setResponseSchema(spec: SwaggerSpec, schema: unknown): void {
-    const mediaType = spec.paths["/x"].get?.responses?.["200"]?.content?.["application/json"] as Record<
+    const mediaType = operation(spec, "/x", "get")?.responses?.["200"]?.content?.["application/json"] as Record<
         string,
         unknown
     >;
@@ -86,7 +100,7 @@ describe("inlineNestedRefs", () => {
         } as unknown as SwaggerSpec;
 
         const result = inlineNestedRefs(spec);
-        const schema = result.paths["/ns"].get?.responses?.["200"]?.content?.["application/json"]?.schema;
+        const schema = operation(result, "/ns", "get")?.responses?.["200"]?.content?.["application/json"]?.schema;
 
         expect(schema).toEqual({
             type: "array",
@@ -119,7 +133,7 @@ describe("inlineNestedRefs", () => {
         } as unknown as SwaggerSpec;
 
         const result = inlineNestedRefs(spec);
-        const schema = result.paths["/ns"].put?.parameters?.[0]?.schema;
+        const schema = operation(result, "/ns", "put")?.parameters?.[0]?.schema;
 
         expect(schema).toEqual({
             type: "array",
@@ -148,7 +162,7 @@ describe("inlineNestedRefs", () => {
         } as unknown as SwaggerSpec;
 
         const result = inlineNestedRefs(spec);
-        const schema = result.paths["/pet"].get?.responses?.["200"]?.content?.["application/json"]?.schema;
+        const schema = operation(result, "/pet", "get")?.responses?.["200"]?.content?.["application/json"]?.schema;
 
         expect(schema).toEqual({ $ref: "#/components/schemas/Pet" });
     });
@@ -216,7 +230,7 @@ describe("inlineNestedRefs", () => {
 
         const result = inlineNestedRefs(spec, (message) => warnings.push(message));
 
-        expect(result.paths["/x"].get?.responses?.["200"]?.content?.["application/json"]?.schema).toEqual({
+        expect(operation(result, "/x", "get")?.responses?.["200"]?.content?.["application/json"]?.schema).toEqual({
             type: "array",
             items: { type: "string" },
         });
@@ -725,10 +739,8 @@ components:
         } as unknown as SwaggerSpec;
 
         const result = inlineNestedRefs(spec);
-        const schema = result.paths["/ns"].get?.responses?.["200"]?.content?.["application/json"]?.schema as Record<
-            string,
-            unknown
-        >;
+        const schema = operation(result, "/ns", "get")?.responses?.["200"]?.content?.["application/json"]
+            ?.schema as Record<string, unknown>;
 
         // structuredClone copies Dates as Dates — a copy, but still a real Date.
         expect(schema["example"]).toBeInstanceOf(Date);
@@ -773,7 +785,10 @@ components:
 
         const result = inlineNestedRefs(spec);
 
-        expect(result.paths["/ns"].put?.parameters?.[0]?.schema).toEqual({ type: "array", items: { type: "number" } });
+        expect(operation(result, "/ns", "put")?.parameters?.[0]?.schema).toEqual({
+            type: "array",
+            items: { type: "number" },
+        });
     });
 
     it("leaves an out-of-range array index as-is", () => {
@@ -1058,7 +1073,7 @@ components:
         const warnings: string[] = [];
 
         const result = inlineNestedRefs(spec, (message) => warnings.push(message));
-        const schemaAt = (path: string): unknown => result.paths[path].get?.responses?.["200"]?.schema;
+        const schemaAt = (path: string): unknown => operation(result, path, "get")?.responses?.["200"]?.schema;
 
         // Exhaustion is terminal, so both small refs are left alone — which of
         // them fits in the remainder must not depend on the spec's key order.
@@ -1098,7 +1113,7 @@ components:
         const warnings: string[] = [];
 
         const result = inlineNestedRefs(spec, (message) => warnings.push(message));
-        const schemaAt = (path: string): unknown => result.paths[path].get?.responses?.["200"]?.schema;
+        const schemaAt = (path: string): unknown => operation(result, path, "get")?.responses?.["200"]?.schema;
 
         expect(schemaAt("/b")).toEqual({ type: "array", items: { type: "number" }, format: "uuid" });
         expect(warnings).toHaveLength(2);
@@ -1368,12 +1383,7 @@ components:
         } as unknown as SwaggerSpec;
 
         const result = inlineNestedRefs(spec);
-        const schema = (
-            result.paths["/x"].get?.responses as Record<
-                string,
-                { content: Record<string, { schema: unknown }> } | undefined
-            >
-        )["default"]?.content["application/json"].schema;
+        const schema = operation(result, "/x", "get")?.responses?.["default"]?.content?.["application/json"]?.schema;
 
         expect(schema).toEqual({ type: "array", items: { type: "string" } });
     });

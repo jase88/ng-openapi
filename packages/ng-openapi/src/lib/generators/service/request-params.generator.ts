@@ -1,5 +1,6 @@
 import { Project, SourceFile } from "ts-morph";
 import {
+    emitDocs,
     MethodGenOptions,
     NormalizedOperation,
     pascalCase,
@@ -23,8 +24,11 @@ export class RequestParamsGenerator {
     private readonly registry = new Map<NormalizedOperation, RequestObjectEntry>();
     private readonly usedInterfaceNames = new Set<string>();
 
-    constructor(project: Project, config: MethodGenOptions) {
+    private readonly onWarning?: (message: string) => void;
+
+    constructor(project: Project, config: MethodGenOptions, onWarning?: (message: string) => void) {
         this.project = project;
+        this.onWarning = onWarning;
         this.paramsGenerator = new ServiceMethodParamsGenerator(config);
     }
 
@@ -40,16 +44,11 @@ export class RequestParamsGenerator {
                 if (parameters.length === 0) {
                     return;
                 }
-                // The destructured properties share the method scope with the trailing
-                // observe/options parameters, so those names would not compile
-                const reserved = parameters.find((param) => param.name === "observe" || param.name === "options");
-                if (reserved) {
-                    throw new Error(
-                        `Parameter name '${reserved.name}' conflicts with the reserved '${reserved.name}' method parameter when useSingleRequestParameter is enabled: (${operation.method}) ${operation.path}`,
-                    );
-                }
                 const interfaceName = this.reserveInterfaceName(controllerName, getMethodName(operation));
-                this.registry.set(operation, ServiceMethodRequestObjectGenerator.createEntry(interfaceName, parameters));
+                this.registry.set(
+                    operation,
+                    ServiceMethodRequestObjectGenerator.createEntry(interfaceName, parameters),
+                );
             });
         });
         return this.registry;
@@ -68,7 +67,7 @@ export class RequestParamsGenerator {
                 name: entry.interfaceName,
                 isExported: true,
                 properties: ServiceMethodRequestObjectGenerator.toInterfaceProperties(entry),
-                docs: operation.description ? [operation.description] : undefined,
+                docs: emitDocs(operation.description),
             });
         });
 
@@ -77,7 +76,6 @@ export class RequestParamsGenerator {
         this.addMissingImports(sourceFile);
         sourceFile.formatText();
         sourceFile.insertText(0, REQUEST_PARAMS_GENERATOR_HEADER_COMMENT);
-        sourceFile.saveSync();
 
         this.addModelsBarrelExport(outputRoot);
     }
@@ -101,7 +99,8 @@ export class RequestParamsGenerator {
         let text = sourceFile.getFullText();
         changes.forEach((change) => {
             const span = change.getSpan();
-            text = text.slice(0, span.getStart()) + change.getNewText() + text.slice(span.getStart() + span.getLength());
+            text =
+                text.slice(0, span.getStart()) + change.getNewText() + text.slice(span.getStart() + span.getLength());
         });
         sourceFile.replaceWithText(text);
     }
@@ -113,19 +112,28 @@ export class RequestParamsGenerator {
     private reserveInterfaceName(controllerName: string, methodName: string): string {
         const base = `${pascalCase(methodName)}Params`;
         const candidates = [base, `${pascalCase(controllerName)}${base}`];
-        for (const candidate of candidates) {
-            if (!this.usedInterfaceNames.has(candidate)) {
-                this.usedInterfaceNames.add(candidate);
-                return candidate;
-            }
+        if (!this.usedInterfaceNames.has(base)) {
+            this.usedInterfaceNames.add(base);
+            return base;
+        }
+        const warnRenamed = (name: string): string => {
+            this.usedInterfaceNames.add(name);
+            // An exported type in the consumer's import graph, named by what
+            // else the spec declares — a breaking change to call sites if silent.
+            this.onWarning?.(
+                `Request-parameter interface "${base}" is already taken; the parameters of "${methodName}" in ` +
+                    `${controllerName} are exposed as "${name}". Renaming the operationId keeps the type name stable.`,
+            );
+            return name;
+        };
+        if (!this.usedInterfaceNames.has(candidates[1])) {
+            return warnRenamed(candidates[1]);
         }
         let suffix = 2;
         while (this.usedInterfaceNames.has(`${candidates[1]}${suffix}`)) {
             suffix++;
         }
-        const name = `${candidates[1]}${suffix}`;
-        this.usedInterfaceNames.add(name);
-        return name;
+        return warnRenamed(`${candidates[1]}${suffix}`);
     }
 
     private addModelsBarrelExport(outputRoot: string): void {
@@ -135,6 +143,5 @@ export class RequestParamsGenerator {
         }
         modelsIndex.addExportDeclaration({ moduleSpecifier: "./request-params" });
         modelsIndex.formatText();
-        modelsIndex.saveSync();
     }
 }

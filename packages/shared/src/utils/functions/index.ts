@@ -1,7 +1,23 @@
 // Public API of the helper functions. Explicit exports only — anything not
 // listed here is internal and free to refactor.
-export { getBasePathTokenName, getClientContextTokenName, getInterceptorsTokenName } from "./token-names";
+export {
+    clientNameIdentifier,
+    effectiveClientName,
+    getBasePathTokenName,
+    getClientContextTokenName,
+    getInterceptorsTokenName,
+} from "./token-names";
 export { getModelTypeName, getResourceClassName, getServiceClassName } from "./class-names";
+export {
+    deriveLocalName,
+    RESOURCE_ARGUMENT_PROFILE,
+    resolveArgumentNames,
+    SERVICE_ARGUMENT_PROFILE,
+} from "./argument-names";
+export type { ArgumentNameProfile, ArgumentNames, RenamedArgument } from "./argument-names";
+export { groupOperationsByController } from "./controller-groups";
+export { getOperationMethodName, RESERVED_MEMBER_NAMES, reservedMemberCollision } from "./method-names";
+export { assertDistinctMemberNames } from "./distinct-member-names";
 export { hasDuplicateFunctionNames } from "./duplicate-function-name";
 export { extractPaths } from "./extract-paths";
 export {

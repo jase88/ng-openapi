@@ -2,7 +2,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { GeneratorConfig, SwaggerParser } from "../src";
+import { GeneratorConfig, SwaggerParser, SwaggerSpec } from "../src";
+
+/** The `/ns` GET 200 JSON schema, read loosely: the spec types model responses as `Reference | …`. */
+function responseSchema(spec: SwaggerSpec): unknown {
+    const operation = (spec.paths["/ns"] as Record<string, { responses?: Record<string, unknown> } | undefined>)["get"];
+    const response = operation?.responses?.["200"] as { content?: Record<string, { schema?: unknown }> } | undefined;
+    return response?.content?.["application/json"]?.schema;
+}
 
 const config: GeneratorConfig = {
     input: "spec.json",
@@ -125,7 +132,7 @@ describe("SwaggerParser.create from files", () => {
         const inspectingConfig: GeneratorConfig = {
             ...config,
             validateInput: (spec) => {
-                seenSchema = spec.paths["/ns"].get?.responses?.["200"]?.content?.["application/json"]?.schema;
+                seenSchema = responseSchema(spec);
                 return true;
             },
         };
@@ -137,7 +144,7 @@ describe("SwaggerParser.create from files", () => {
 
         expect(seenSchema).toEqual({ $ref: "#/components/schemas/Policy/properties/namespaces" });
         // …while the parser itself holds the inlined copy.
-        expect(parser.getSpec().paths["/ns"].get?.responses?.["200"]?.content?.["application/json"]?.schema).toEqual({
+        expect(responseSchema(parser.getSpec())).toEqual({
             type: "array",
             items: { type: "string" },
         });
