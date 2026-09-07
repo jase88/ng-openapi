@@ -1,6 +1,5 @@
-// Concrete-module import (not the ../types barrel) to keep the core <-> types
-// import graph cycle-free — see swagger-parser.ts for the same rule.
 import type { SwaggerSpec } from "../types/swagger.types";
+import { pascalCase } from "../utils/string.utils";
 
 /**
  * Inlines `$ref`s that point at a *nested* location inside a schema (a deep
@@ -21,7 +20,15 @@ import type { SwaggerSpec } from "../types/swagger.types";
  * inlining once here fixes every consumer at the same time.
  *
  * Plain top-level refs (`#/components/schemas/Pet`, `#/definitions/Pet`) are
- * left untouched so they keep generating an imported model. A deep pointer that
+ * left untouched so they keep generating an imported model. Only pointers
+ * rooted at `components/schemas` or `definitions` are inlined; a deep pointer
+ * into any other root (`#/components/responses/E/content/application~1json/
+ * schema`, `#/paths/…/schema`, Swagger 2.0 `#/parameters/X/schema` — the shape
+ * `redocly bundle` and `swagger-cli bundle` emit for a repeated subschema) is
+ * passed through and warned about, naming the dangling type downstream will
+ * emit from its last segment. Refs to a whole component of another kind
+ * (`#/components/parameters/Limit`) are ordinary OpenAPI and stay silent.
+ * A deep pointer that
  * cannot be inlined — unresolvable, cyclic, resolving to a non-schema value,
  * not addressing a schema *position*, or past the expansion limits below — is
  * left in place rather than thrown on (destroying the ref would lose
@@ -96,7 +103,8 @@ type WarnCause =
     | "budget"
     | "sibling-conflict"
     | "sibling-on-boolean"
-    | "malformed-ref";
+    | "malformed-ref"
+    | "unsupported-pointer-root";
 
 /** Noun phrase each cause reads as in the "…and N more" tail. */
 const WARNING_CAUSE_LABELS: Record<WarnCause, string> = {
@@ -109,6 +117,7 @@ const WARNING_CAUSE_LABELS: Record<WarnCause, string> = {
     "sibling-conflict": "nested $ref site(s) whose siblings overrode the target",
     "sibling-on-boolean": "nested $ref site(s) whose siblings were dropped on a boolean target",
     "malformed-ref": "non-string $ref value(s)",
+    "unsupported-pointer-root": "deep $ref(s) into a root this pass does not inline",
 };
 
 /** Ambient state of one `inlineNestedRefs` run, threaded through the walk. */
@@ -171,7 +180,10 @@ function transform(node: unknown, ctx: InlineContext, chain: string[], keysAreNa
         return node;
     }
 
-    const ref = node["$ref"];
+    // In a name-keyed container (`properties: { $ref: { type: "string" } }`)
+    // the key is a property the author happened to call `$ref`, not the
+    // keyword — it is neither a pointer to follow nor a malformed ref to report.
+    const ref = keysAreNames ? undefined : node["$ref"];
     if (typeof ref === "string") {
         if (isDeepSchemaPointer(ref)) {
             const inlined = inlineTarget(node, ref, ctx, chain);
@@ -183,6 +195,23 @@ function transform(node: unknown, ctx: InlineContext, chain: string[], keysAreNa
             // second deep ref sitting next to (or under) a broken one would be
             // neither inlined nor named — invisible under `@ts-nocheck`, which
             // is exactly what this pass exists to prevent.
+        } else if (isDeepPointerIntoUnsupportedRoot(ref)) {
+            // Not inlined — this pass only knows the schema roots — but not
+            // silent either: downstream still takes the last segment as a type
+            // name, so `…/content/application~1json/schema` emits `Schema`,
+            // undefined and unimported, exactly the failure the schema-rooted
+            // case is inlined to prevent. Name the type so the user can grep
+            // the output for it.
+            const emittedName = pascalCase(ref.split("/").pop() ?? "");
+            warnOnce(
+                ctx,
+                "unsupported-pointer-root",
+                ref,
+                `Nested $ref "${ref}" points into a part of the document this generator does not inline ` +
+                    `(only #/components/schemas/… and #/definitions/… are) — it will be emitted as the type ` +
+                    `"${emittedName}", which nothing defines. Promote the target to a named schema and reference ` +
+                    `that. ${WRONG_TYPE_SUFFIX}`,
+            );
         }
     } else if (ref !== undefined) {
         // A malformed spec can hold anything here. Ignored for inlining — but
@@ -375,6 +404,10 @@ const PAYLOAD_KEYS = new Set(["example", "examples", "default", "enum", "const"]
  * `example`, or the very common `responses: { default: … }` — as a payload
  * position. Listing a container that does not need it is harmless (it only
  * *enables* walking one level down), so this errs generous.
+ *
+ * `examples` (the media-type map, `components.examples`) is deliberately absent:
+ * PAYLOAD_KEYS is checked first and already skips it, and its entries are
+ * Example Objects — payloads — so skipping is the right outcome either way.
  */
 const NAME_KEYED_CONTAINERS = new Set([
     // Schema keyword maps
@@ -392,7 +425,6 @@ const NAME_KEYED_CONTAINERS = new Set([
     "securitySchemes",
     "links",
     "callbacks",
-    "examples",
     "encoding",
     "variables",
     "content",
@@ -504,9 +536,34 @@ const ANNOTATION_ONLY_KEYS = new Set([
  * neither reading of the spec produces a different type and there is nothing to
  * report. Compared against the *inlined* target, so a value this pass rewrote
  * reads as different and warns — the safe direction.
+ *
+ * Structural, not `JSON.stringify` equality: object key order is not meaning in
+ * JSON, so `properties: { b, a }` restating a target's `{ a, b }` is the same
+ * value and must not read as a conflict.
  */
 function sameValue(a: unknown, b: unknown): boolean {
-    return a === b || JSON.stringify(a) === JSON.stringify(b);
+    if (a === b) {
+        return true;
+    }
+    if (Array.isArray(a) || Array.isArray(b)) {
+        return (
+            Array.isArray(a) &&
+            Array.isArray(b) &&
+            a.length === b.length &&
+            a.every((item, index) => sameValue(item, b[index]))
+        );
+    }
+    if (isPlainObject(a) && isPlainObject(b)) {
+        const keys = Object.keys(a);
+        return (
+            keys.length === Object.keys(b).length &&
+            keys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && sameValue(a[key], b[key]))
+        );
+    }
+    // Two class instances (js-yaml `Date`s) compare by their serialization; a
+    // primitive against anything else, or a plain object against an instance,
+    // is different.
+    return typeof a === "object" && typeof b === "object" && safeStringify(a) === safeStringify(b);
 }
 
 /**
@@ -550,7 +607,11 @@ function flushDeferredWarnings(ctx: InlineContext): void {
     }
 }
 
-/** How a non-schema pointer target reads in a warning: "null", "an array", "a Date". */
+/**
+ * How a value reads in a warning: "null", "an array", "an object", "a Date".
+ * Serves both the non-schema pointer target (never a plain object — those are
+ * schemas and pass the guard) and the malformed `$ref` value, which can be one.
+ */
 function describeKind(value: unknown): string {
     if (value === null) {
         return "null";
@@ -558,9 +619,11 @@ function describeKind(value: unknown): string {
     if (Array.isArray(value)) {
         return "an array";
     }
+    if (isPlainObject(value)) {
+        return "an object";
+    }
     if (typeof value === "object") {
-        // Reached only for class instances — plain objects are schemas. js-yaml
-        // hands us `Date`s for unquoted timestamps, so name the class.
+        // A class instance: js-yaml hands us `Date`s for unquoted timestamps.
         const className: unknown = Object.getPrototypeOf(value)?.constructor?.name;
         return typeof className === "string" ? `a ${className}` : "a non-plain object";
     }
@@ -613,6 +676,30 @@ function isDeepSchemaPointer(ref: string): boolean {
         return segments.length > 2;
     }
     return false;
+}
+
+/**
+ * A same-document pointer that reaches *into* something other than a schema
+ * definition — `#/components/responses/E/content/application~1json/schema`,
+ * `#/paths/~1x/get/…/schema`, Swagger 2.0 `#/parameters/X/schema` — as bundlers
+ * emit when they de-duplicate a subschema whose first occurrence sits outside
+ * the schema map. Downstream reads these exactly like a schema ref (last
+ * segment → type name), so they fail the way a schema-rooted deep pointer did
+ * before inlining, and must be reported even though this pass does not resolve
+ * them.
+ *
+ * A ref to a *whole* entry — `#/components/<kind>/<Name>`, `#/parameters/<Name>`,
+ * `#/paths/<path>` — is ordinary OpenAPI (a shared parameter, response or path
+ * item) and stays silent, as does anything not `#/`-rooted: external refs are
+ * out of scope.
+ */
+function isDeepPointerIntoUnsupportedRoot(ref: string): boolean {
+    if (!ref.startsWith("#/") || isDeepSchemaPointer(ref)) {
+        return false;
+    }
+    const segments = ref.slice(2).split("/");
+    const wholeEntryDepth = segments[0] === "components" ? 3 : 2;
+    return segments.length > wholeEntryDepth;
 }
 
 /**

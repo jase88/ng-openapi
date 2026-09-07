@@ -21,10 +21,13 @@ Every generation run flows through the same stages:
   `SwaggerParser.create` then runs `inline-nested-refs.ts` once: deep-pointer
   `$ref`s (`#/components/schemas/X/properties/y`) are replaced by a copy of
   their target — downstream a `$ref` becomes a type name taken from its last
-  segment, which for these matches no model. Parse time is upstream of _both_
-  raw-spec readers and the IR, so one pass fixes every consumer; top-level refs
-  are left alone to keep generating imported models; keys sitting next to a
-  deep `$ref` are kept and win over the target's — with a warning when one
+  segment, which for these matches no model. Only the schema roots
+  (`components/schemas`, `definitions`) are inlined; a deep pointer into any
+  other root is passed through and warned about, naming the dangling type it
+  will emit. Parse time is upstream of _both_ raw-spec readers and the IR, so
+  one pass fixes every consumer; top-level refs are left alone to keep
+  generating imported models; keys sitting next to a deep `$ref` are kept and
+  win over the target's — with a warning when one
   overrides a _type-bearing_ key the target defines, the one case where that
   choice changes the emitted type; an annotation-only override (`description`,
   `example`) is the ordinary authoring shape and stays silent.
@@ -133,12 +136,12 @@ recognizes an error thrown by a plugin's own bundled copy of this module.
 `@ng-openapi/shared` is inlined into each published plugin, so the same class
 exists more than once at runtime and the prototype chain alone would not match.
 
-Problems the run survives go to the `onWarning` sink (an unresolvable `$ref`, a
-skipped definition): output is still produced, so the user must be told which
-construct is wrong. Say what the consumer will actually see — generated files
-ship `@ts-nocheck`, so these degrade to a silently wrong type rather than a
-compile error, and a warning promising "will not compile" is false. Silent
-degradation is never acceptable.
+Problems the run survives go to the `onWarning` sink (an unresolvable `$ref`,
+two models whose file names collide — see `model-file-registry.ts`): output is
+still produced, so the user must be told which construct is wrong. Say what the
+consumer will actually see — generated files ship `@ts-nocheck`, so these
+degrade to a silently wrong type rather than a compile error, and a warning
+promising "will not compile" is false. Silent degradation is never acceptable.
 
 ### Plugin contract
 

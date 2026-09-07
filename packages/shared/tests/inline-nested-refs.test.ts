@@ -257,6 +257,44 @@ describe("inlineNestedRefs", () => {
         expect(warnings[0]).toContain("42");
     });
 
+    it("describes an object-valued $ref as an object, not by its constructor", () => {
+        const spec = specWithResponseRef("#/components/schemas/A/properties/n", {
+            A: { type: "object", properties: { n: { $ref: { nested: true } } } },
+        });
+        const warnings: string[] = [];
+
+        inlineNestedRefs(spec, (message) => warnings.push(message));
+
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("is an object, not a string");
+        expect(warnings[0]).not.toContain("a Object");
+    });
+
+    it("does not mistake a property literally named `$ref` for the keyword", () => {
+        // Inside a `properties` map the key is a field name; its value is a
+        // schema, not a pointer, so there is nothing to follow and nothing
+        // malformed to report. The deep ref next to it still inlines.
+        const spec = specWithResponseRef("#/components/schemas/Wrapper/properties/$ref", {
+            Wrapper: {
+                type: "object",
+                properties: {
+                    $ref: { type: "string" },
+                    n: { $ref: "#/components/schemas/A/properties/n" },
+                },
+            },
+            A: { type: "object", properties: { n: { type: "array", items: { type: "string" } } } },
+        });
+        const warnings: string[] = [];
+
+        const result = inlineNestedRefs(spec, (message) => warnings.push(message));
+        const wrapper = result.components?.schemas?.["Wrapper"]?.properties as Record<string, unknown>;
+
+        expect(responseSchema(result)).toEqual({ type: "string" });
+        expect(wrapper["$ref"]).toEqual({ type: "string" });
+        expect(wrapper["n"]).toEqual({ type: "array", items: { type: "string" } });
+        expect(warnings).toEqual([]);
+    });
+
     it('leaves a pointer at a scalar in place and warns — `.../type` is the string "array"', () => {
         const ref = "#/components/schemas/PolicyEntry/properties/namespaces/type";
         const spec = specWithResponseRef(ref, policyEntrySchemas);
@@ -374,15 +412,68 @@ describe("inlineNestedRefs", () => {
         expect(warnings).toEqual([]);
     });
 
-    it("ignores a deep pointer into a component kind other than schemas", () => {
-        const ref = "#/components/parameters/Limit/schema";
-        const spec = specWithResponseRef(ref, policyEntrySchemas);
-        const warnings: string[] = [];
+    describe("deep pointers into roots this pass does not inline", () => {
+        // Only `components/schemas` and `definitions` are inlined. A deep
+        // pointer into any other root is passed through untouched — but
+        // downstream still turns its last segment into a type name
+        // (`getTypeScriptType`, `TypeResolver.resolveReference`), so
+        // `…/schema` emits an undefined, unimported `Schema`. That is the very
+        // failure the schema-rooted case is inlined to prevent, so it has to be
+        // named here; bundlers (`redocly bundle`, `swagger-cli bundle`) produce
+        // this shape whenever a repeated subschema first occurs outside the
+        // schema map, so nobody has to hand-write one.
+        it.each([
+            ["a component kind other than schemas", "#/components/parameters/Limit/schema", "Schema"],
+            [
+                "a response's media type",
+                "#/components/responses/ErrorResponse/content/application~1json/schema",
+                "Schema",
+            ],
+            ["an operation under paths", "#/paths/~1pets/get/responses/200/content/application~1json/schema", "Schema"],
+            ["a Swagger 2.0 top-level parameter", "#/parameters/Limit/schema", "Schema"],
+            [
+                "a nested property of a non-schema component",
+                "#/components/headers/X-Rate/schema/properties/limit",
+                "Limit",
+            ],
+        ])("leaves a deep pointer into %s in place and names the type it will emit", (_, ref, emitted) => {
+            const spec = specWithResponseRef(ref, policyEntrySchemas);
+            const warnings: string[] = [];
 
-        // Only schema definitions get the last-segment-becomes-a-type-name
-        // treatment downstream, so only they need inlining.
-        expect(responseSchema(inlineNestedRefs(spec, (message) => warnings.push(message)))).toEqual({ $ref: ref });
-        expect(warnings).toEqual([]);
+            expect(responseSchema(inlineNestedRefs(spec, (message) => warnings.push(message)))).toEqual({
+                $ref: ref,
+            });
+            expect(warnings).toHaveLength(1);
+            expect(warnings[0]).toContain(ref);
+            expect(warnings[0]).toContain(`"${emitted}"`);
+            expect(warnings[0]).toContain("@ts-nocheck");
+        });
+
+        it.each([
+            ["a whole component of another kind", "#/components/parameters/Limit"],
+            ["a whole Swagger 2.0 response", "#/responses/NotFound"],
+            ["a whole path item", "#/paths/~1pets"],
+        ])("stays silent for a $ref to %s — ordinary OpenAPI, not a type", (_, ref) => {
+            const spec = specWithResponseRef(ref, policyEntrySchemas);
+            const warnings: string[] = [];
+
+            expect(responseSchema(inlineNestedRefs(spec, (message) => warnings.push(message)))).toEqual({
+                $ref: ref,
+            });
+            expect(warnings).toEqual([]);
+        });
+
+        it("warns once per ref, however many sites use it", () => {
+            const ref = "#/components/parameters/Limit/schema";
+            const spec = specWithResponseRef(ref, {
+                A: { type: "object", properties: { a: { $ref: ref }, b: { $ref: ref } } },
+            });
+            const warnings: string[] = [];
+
+            inlineNestedRefs(spec, (message) => warnings.push(message));
+
+            expect(warnings).toHaveLength(1);
+        });
     });
 
     it("keeps a schema literally named `__proto__` as an own key instead of hijacking the prototype", () => {
@@ -1015,6 +1106,30 @@ components:
         const result = inlineNestedRefs(spec, (message) => warnings.push(message));
 
         expect(responseSchema(result)).toEqual({ type: "array", items: { type: "string" } });
+        expect(warnings).toEqual([]);
+    });
+
+    it("treats a restated value with a different key order as the same value", () => {
+        // Key order is not meaning in JSON; a `JSON.stringify` comparison would
+        // have called this a conflict.
+        const ref = "#/components/schemas/A/properties/n";
+        const spec = specWithResponseRef(ref, {
+            A: {
+                type: "object",
+                properties: {
+                    n: { type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+                },
+            },
+        });
+        setResponseSchema(spec, { $ref: ref, properties: { b: { type: "number" }, a: { type: "string" } } });
+        const warnings: string[] = [];
+
+        const result = inlineNestedRefs(spec, (message) => warnings.push(message));
+
+        expect(responseSchema(result)).toEqual({
+            type: "object",
+            properties: { b: { type: "number" }, a: { type: "string" } },
+        });
         expect(warnings).toEqual([]);
     });
 
